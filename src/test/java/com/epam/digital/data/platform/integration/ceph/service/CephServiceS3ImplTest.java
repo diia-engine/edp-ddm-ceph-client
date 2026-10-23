@@ -378,6 +378,70 @@ class CephServiceS3ImplTest {
   }
 
   @Test
+  void shouldKeepContentHeadersWhenSetUserMetadata() {
+    var contentKey = "key";
+    var bucketName = "bucket";
+    var currentMetadata = new ObjectMetadata();
+    currentMetadata.setContentType("application/zip");
+    currentMetadata.setContentDisposition("attachment; filename=\"archive.zip\"");
+    currentMetadata.setContentEncoding("identity");
+    currentMetadata.setContentLanguage("uk");
+    currentMetadata.setCacheControl("no-cache");
+    currentMetadata.setContentLength(111L);
+    currentMetadata.setHeader("ETag", "etag");
+    currentMetadata.setUserMetadata(Map.of("id", contentKey));
+    var newUserMetadata = Map.of("id", contentKey, "checksum", "sha256hex");
+
+    when(amazonS3.listBuckets()).thenReturn(Collections.singletonList(new Bucket(bucketName)));
+    when(amazonS3.getObjectMetadata(bucketName, contentKey)).thenReturn(currentMetadata);
+
+    cephServiceS3.setUserMetadata(bucketName, contentKey, newUserMetadata);
+
+    var requestCaptor = ArgumentCaptor.forClass(CopyObjectRequest.class);
+    verify(amazonS3).copyObject(requestCaptor.capture());
+    var request = requestCaptor.getValue();
+    assertThat(request.getSourceBucketName()).isEqualTo(bucketName);
+    assertThat(request.getSourceKey()).isEqualTo(contentKey);
+    assertThat(request.getDestinationBucketName()).isEqualTo(bucketName);
+    assertThat(request.getDestinationKey()).isEqualTo(contentKey);
+    var newMetadata = request.getNewObjectMetadata();
+    assertThat(newMetadata.getContentType()).isEqualTo("application/zip");
+    assertThat(newMetadata.getContentDisposition())
+        .isEqualTo("attachment; filename=\"archive.zip\"");
+    assertThat(newMetadata.getContentEncoding()).isEqualTo("identity");
+    assertThat(newMetadata.getContentLanguage()).isEqualTo("uk");
+    assertThat(newMetadata.getCacheControl()).isEqualTo("no-cache");
+    assertThat(newMetadata.getUserMetadata()).isEqualTo(newUserMetadata);
+    assertThat(newMetadata.getRawMetadata())
+        .doesNotContainKeys("Content-Length", "ETag");
+  }
+
+  @Test
+  void shouldNotSendAbsentContentHeadersWhenSetUserMetadata() {
+    var contentKey = "key";
+    var bucketName = "bucket";
+    // right after putObject Ceph returns Content-Type only, the other content headers are absent
+    var currentMetadata = new ObjectMetadata();
+    currentMetadata.setContentType("application/pdf");
+    currentMetadata.setContentLength(15L);
+    currentMetadata.setUserMetadata(Map.of("id", contentKey));
+    var newUserMetadata = Map.of("id", contentKey, "checksum", "sha256hex");
+
+    when(amazonS3.listBuckets()).thenReturn(Collections.singletonList(new Bucket(bucketName)));
+    when(amazonS3.getObjectMetadata(bucketName, contentKey)).thenReturn(currentMetadata);
+
+    cephServiceS3.setUserMetadata(bucketName, contentKey, newUserMetadata);
+
+    var requestCaptor = ArgumentCaptor.forClass(CopyObjectRequest.class);
+    verify(amazonS3).copyObject(requestCaptor.capture());
+    var newMetadata = requestCaptor.getValue().getNewObjectMetadata();
+    // a header with null value makes the S3 client fail with NPE while building the request
+    assertThat(newMetadata.getRawMetadata()).containsOnly(
+        Map.entry("Content-Type", "application/pdf"));
+    assertThat(newMetadata.getUserMetadata()).isEqualTo(newUserMetadata);
+  }
+
+  @Test
   void shouldSearchFileMetadataWhenOneOfKeysDoesNotExist() {
     var key1 = "key1";
     var key2 = "key2";

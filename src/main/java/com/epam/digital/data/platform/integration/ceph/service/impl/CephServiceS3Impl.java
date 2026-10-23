@@ -229,21 +229,44 @@ public class CephServiceS3Impl implements CephService {
       Map<String, String> userMetadata) {
     assertBucketExists(cephAmazonS3, cephBucketName);
 
-    var newMetadata = new ObjectMetadata();
-    newMetadata.setUserMetadata(userMetadata);
-
-    var request = new CopyObjectRequest(cephBucketName, key, cephBucketName, key)
-        .withSourceBucketName(cephBucketName)
-        .withSourceKey(key)
-        .withNewObjectMetadata(newMetadata);
-
     var result = execute(() -> {
+      var currentMetadata = cephAmazonS3.getObjectMetadata(cephBucketName, key);
+      var request = new CopyObjectRequest(cephBucketName, key, cephBucketName, key)
+          .withNewObjectMetadata(withContentHeaders(currentMetadata, userMetadata));
       cephAmazonS3.copyObject(request);
       return cephAmazonS3.getObjectMetadata(cephBucketName, key);
     });
     log.info("User metadata has been assigned to the object with the key {} in the bucket {}",
         key, cephBucketName);
     return toCephObjectMetadata(result);
+  }
+
+  /**
+   * Builds the metadata of the object copied onto itself. New metadata on a copy request replaces
+   * the existing one as a whole, so the content headers have to be carried over or the object
+   * loses e.g. its {@code Content-Type}. The whole {@link ObjectMetadata} is not cloned on purpose:
+   * its raw metadata also holds {@code Content-Length}, {@code ETag} and other response headers
+   * that must not be sent with the copy request.
+   *
+   * <p>Only the headers the object actually has are carried over: a setter called with
+   * {@code null} still puts the header into the raw metadata, and the S3 client fails with a
+   * {@link NullPointerException} on such a header while building the copy request.
+   */
+  private ObjectMetadata withContentHeaders(ObjectMetadata currentMetadata,
+      Map<String, String> userMetadata) {
+    var newMetadata = new ObjectMetadata();
+    Optional.ofNullable(currentMetadata.getContentType())
+        .ifPresent(newMetadata::setContentType);
+    Optional.ofNullable(currentMetadata.getContentDisposition())
+        .ifPresent(newMetadata::setContentDisposition);
+    Optional.ofNullable(currentMetadata.getContentEncoding())
+        .ifPresent(newMetadata::setContentEncoding);
+    Optional.ofNullable(currentMetadata.getContentLanguage())
+        .ifPresent(newMetadata::setContentLanguage);
+    Optional.ofNullable(currentMetadata.getCacheControl())
+        .ifPresent(newMetadata::setCacheControl);
+    newMetadata.setUserMetadata(userMetadata);
+    return newMetadata;
   }
 
   private void assertBucketExists(AmazonS3 cephAmazonS3, String cephBucketName) {
